@@ -115,6 +115,7 @@ jobs:
           LT_ACCESS_KEY:  ${{ secrets.LT_ACCESS_KEY }}
         run: |
           kane-cli login --username "$LT_USERNAME" --access-key "$LT_ACCESS_KEY"
+          kane-cli install skill
           kane-cli config project ${{ secrets.KANE_PROJECT_ID }}   # kane-agentic
           kane-cli config folder ${{ secrets.KANE_FOLDER_ID }}     # autonomusTCs
           kane-cli whoami
