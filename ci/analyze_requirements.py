@@ -60,8 +60,8 @@ def run_kane_verification(ac: dict) -> dict:
     try:
         result = subprocess.run(
             ["kane-cli", "run", objective, "--agent", "--headless",
-             "--timeout", "60", "--max-steps", "12"],
-            capture_output=True, text=True, timeout=90
+             "--timeout", "120", "--max-steps", "20"],
+            capture_output=True, text=True, timeout=150
         )
         # Parse NDJSON output — terminal event is type: "run_end"
         status = "failed"
@@ -117,7 +117,7 @@ def main() -> None:
     print(f"[analyze] {len(all_acs)} ACs found — running KaneAI verification in parallel")
     results_map: dict[str, dict] = {}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(run_kane_verification, ac): ac["id"] for ac in all_acs}
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
