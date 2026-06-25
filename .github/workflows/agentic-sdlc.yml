@@ -37,6 +37,11 @@ on:
         required: false
         default: "false"
         type: boolean
+      skip_kaneai:
+        description: "Skip Stage 1 KaneAI verification — reuse existing analyzed_requirements.json"
+        required: false
+        default: "false"
+        type: boolean
 
 env:
   NODE_VERSION: "22"
@@ -51,19 +56,39 @@ jobs:
       actions: write
     env:
       DEMO_MODE: ${{ github.event_name == 'push' && 'false' || inputs.demo_mode || 'false' }}
+      SKIP_KANEAI: ${{ inputs.skip_kaneai || 'false' }}
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: "Skip Stage 1 — reuse existing analyzed_requirements.json"
+        if: env.SKIP_KANEAI == 'true'
+        run: |
+          if [ ! -f requirements/analyzed_requirements.json ]; then
+            echo "ERROR: requirements/analyzed_requirements.json not found — cannot skip KaneAI" >&2
+            exit 1
+          fi
+          echo "Skipping KaneAI — reusing existing analyzed_requirements.json"
+          python3 -c "
+          import json
+          from pathlib import Path
+          data = json.loads(Path('requirements/analyzed_requirements.json').read_text())
+          passed = sum(1 for r in data if r.get('kane_status') == 'passed')
+          print(f'Reusing {len(data)} requirements ({passed} passed) — Stage 1 skipped')
+          "
+
       - uses: actions/setup-node@v4
+        if: env.SKIP_KANEAI != 'true'
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - uses: actions/setup-python@v5
+        if: env.SKIP_KANEAI != 'true'
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache npm (Kane CLI)
+        if: env.SKIP_KANEAI != 'true'
         uses: actions/cache@v4
         with:
           path: ~/.npm
@@ -71,6 +96,7 @@ jobs:
           restore-keys: npm-kane-${{ runner.os }}-
 
       - name: Cache pip
+        if: env.SKIP_KANEAI != 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -79,7 +105,7 @@ jobs:
 
       # Always clear Kane cache on push so stale live results never poison the pipeline
       - name: Clear Kane cache (on push or full manual run)
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_run == true && env.DEMO_MODE != 'true')
+        if: env.SKIP_KANEAI != 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_run == true && env.DEMO_MODE != 'true'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -95,6 +121,7 @@ jobs:
 
       # If requirements are unchanged, reuse cached Kane results — skip live calls
       - name: Cache Kane results (by requirements hash)
+        if: env.SKIP_KANEAI != 'true'
         id: kane-cache
         uses: actions/cache@v4
         with:
@@ -102,10 +129,11 @@ jobs:
           key: kane-results-${{ hashFiles('requirements/*.txt') }}
 
       - name: Install Python dependencies
+        if: env.SKIP_KANEAI != 'true'
         run: pip install -r requirements.txt --cache-dir ~/.cache/pip -q
 
       - name: Install Google Chrome
-        if: steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
+        if: env.SKIP_KANEAI != 'true' && steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
         run: |
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
@@ -114,11 +142,11 @@ jobs:
           google-chrome --version
 
       - name: Install Kane CLI
-        if: steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
+        if: env.SKIP_KANEAI != 'true' && steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
         run: npm install -g @testmuai/kane-cli
 
       - name: Configure Kane CLI (project=kane-agentic, folder=autonomusTCs)
-        if: steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
+        if: env.SKIP_KANEAI != 'true' && steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
         env:
           LT_USERNAME:    ${{ secrets.LT_USERNAME }}
           LT_ACCESS_KEY:  ${{ secrets.LT_ACCESS_KEY }}
@@ -131,12 +159,12 @@ jobs:
 
       # DEMO MODE — loads pre-seeded results in <5s, no live browser calls
       - name: "KaneAI · DEMO MODE (pre-generated results)"
-        if: env.DEMO_MODE == 'true'
+        if: env.SKIP_KANEAI != 'true' && env.DEMO_MODE == 'true'
         run: python ci/analyze_requirements.py --demo-mode
 
       # Cache hit — requirements unchanged, reuse previous results
       - name: "KaneAI · Cache hit (requirements unchanged)"
-        if: steps.kane-cache.outputs.cache-hit == 'true' && env.DEMO_MODE != 'true'
+        if: env.SKIP_KANEAI != 'true' && steps.kane-cache.outputs.cache-hit == 'true' && env.DEMO_MODE != 'true'
         run: |
           python - <<'PYEOF'
           import json, sys
@@ -149,7 +177,7 @@ jobs:
 
       # Cache miss — run live KaneAI verification
       - name: "KaneAI · Live verification"
-        if: steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
+        if: env.SKIP_KANEAI != 'true' && steps.kane-cache.outputs.cache-hit != 'true' && env.DEMO_MODE != 'true'
         env:
           LT_USERNAME:        ${{ secrets.LT_USERNAME }}
           LT_ACCESS_KEY:      ${{ secrets.LT_ACCESS_KEY }}
@@ -157,6 +185,7 @@ jobs:
         run: python ci/analyze_requirements.py
 
       - name: Show Stage 1 summary
+        if: env.SKIP_KANEAI != 'true'
         run: |
           python - <<'PYEOF'
           import json
