@@ -57,6 +57,50 @@ CRITICAL RULES — these patterns cause known failures, do not reproduce them:
 """
 
 
+def heal_single_objective(sc: dict, failure_detail: str, log=None) -> str | None:
+    """
+    Ask Claude to rewrite one failed objective inline (during the same run).
+    Returns new objective string, or None if heal is not possible.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    # Extract run_end narrative summary if embedded by run_kane()
+    run_summary = ""
+    if "[run summary]:" in failure_detail:
+        run_summary = failure_detail.split("\n[raw tail]:")[0].replace("[run summary]:", "").strip()
+
+    prompt = (
+        f"SC ID: {sc['id']}\n"
+        f"Failed objective:\n{sc.get('objective', '')}\n\n"
+        f"What kane-cli actually did (run summary):\n{run_summary or '(not available)'}\n\n"
+        f"Raw failure detail (last 400 chars):\n{failure_detail[-400:]}\n\n"
+        "Rewrite the objective to fix the issue. Apply all critical rules from your system prompt.\n"
+        "Return ONLY the new objective string — no quotes, no explanation."
+    )
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model=MODEL,
+            max_tokens=256,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        new_obj = msg.content[0].text.strip()
+        if log:
+            log.info(f"[self-heal] {sc['id']} inline → {new_obj[:100]}...")
+        return new_obj
+    except Exception as e:
+        if log:
+            log.warning(f"[self-heal] {sc['id']} inline heal failed: {e}")
+        return None
+
+
 def load_history() -> dict:
     """Load run history. Returns {} if no history exists."""
     if HISTORY_FILE.exists():

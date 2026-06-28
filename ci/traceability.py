@@ -124,6 +124,23 @@ def build_matrix() -> dict:
     }
 
 
+def _clean_failure_detail(text: str, max_len: int = 0) -> str:
+    """
+    Extract the human-readable part of failure_detail.
+    Strips [run summary]: / [raw tail]: tags inserted by run_kane().
+    If both sections exist, returns the run summary (the narrative) — it is
+    more readable than the raw NDJSON tail.
+    """
+    if not text:
+        return ""
+    if "[run summary]:" in text:
+        summary = text.split("\n[raw tail]:")[0].replace("[run summary]:", "").strip()
+        result = summary if summary else text
+    else:
+        result = text
+    return result[:max_len] if max_len else result
+
+
 def write_markdown(matrix: dict) -> str:
     rows    = matrix["rows"]
     summary = matrix["summary"]
@@ -142,15 +159,14 @@ def write_markdown(matrix: dict) -> str:
     for r in rows:
         tm_id   = r.get("tm_id", "")
         sc_name = r.get("sc_name", r["sc_id"])
-        sc_cell = sc_name[:45]
         # TM TC column: hyperlinked TC-NNNNN label or pending
         tc_cell = r.get("tc_link") or ("pending" if not tm_id else r["tc_internal"])
-        # RCA: prefer LT AI RCA, fall back to kane-cli failure detail
-        rca_val = r.get("rca") or (r.get("failure_detail", "")[:80] if r["status"] == "failed" else "")
+        # RCA: prefer LT AI RCA, fall back to clean kane-cli run summary
+        rca_val = r.get("rca") or (_clean_failure_detail(r.get("failure_detail", ""), 80) if r["status"] == "failed" else "")
         rca_snippet = (rca_val[:60] + "…") if len(rca_val) > 60 else (rca_val or "—")
         lines.append(
-            f"| {r['ac_id']} | {r['criterion'][:55]} "
-            f"| {sc_cell} | {tc_cell} | {r['status']} | {r['overall']} | {rca_snippet} |"
+            f"| {r['ac_id']} | {r['criterion']} "
+            f"| {sc_name} | {tc_cell} | {r['status']} | {r['overall']} | {rca_snippet} |"
         )
 
     lines += [
@@ -162,6 +178,15 @@ def write_markdown(matrix: dict) -> str:
         f"**Not run:** {summary['not_run']}",
         f"- **Pass rate:** {summary['pass_rate']}%",
     ]
+
+    lines += ["", "## Scenario Objectives",
+              "",
+              "| SC | Scenario Name | Objective |",
+              "| -- | ------------- | --------- |"]
+    for r in rows:
+        sc_name  = r.get("sc_name", r["sc_id"])
+        objective = r.get("objective", "—")
+        lines.append(f"| {r['sc_id']} | {sc_name} | {objective} |")
 
     if he_jobs:
         lines += ["", "## HyperExecute Jobs"]
@@ -183,8 +208,8 @@ def write_markdown(matrix: dict) -> str:
             if r.get("rca"):
                 lines.append(f"\n**AI RCA (LambdaTest):**\n\n{r['rca']}")
             elif r.get("failure_detail"):
-                snippet = r["failure_detail"][:300]
-                lines.append(f"\n**Failure detail:**\n```\n{snippet}\n```")
+                snippet = _clean_failure_detail(r["failure_detail"], 400)
+                lines.append(f"\n**What kane-cli did:**\n{snippet}")
 
     return "\n".join(lines)
 

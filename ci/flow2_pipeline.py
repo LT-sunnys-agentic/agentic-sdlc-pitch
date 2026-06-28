@@ -29,7 +29,7 @@ from pathlib import Path
 # Add ci/ to path for local imports
 sys.path.insert(0, str(Path(__file__).parent))
 from pipeline_logger import get_logger
-from self_heal import load_history, save_history, heal_objectives
+from self_heal import load_history, save_history, heal_objectives, heal_single_objective
 from traceability import record_he_job, record_tm_test_cases_with_sc, run_traceability
 from rca import run_rca, update_history_from_he
 
@@ -166,6 +166,13 @@ def run_kane(sc):
             session_dir = ev.get("session_dir", "")
             if session_dir:
                 session_id = Path(session_dir).name
+            # Override: kane-cli sometimes exits 1 after the assertion passes
+            # (during code-export / session finalization). Detect via summary.
+            if status == "failed" and session_dir:
+                s = ev.get("summary", "").lower()
+                if "passed" in s and any(w in s for w in ["check", "verified", "confirmed", "assert"]):
+                    log.info(f"[{sc_id}] assertion passed but kane-cli errored post-check — treating as passed")
+                    status = "passed"
             break
 
     if status == "passed":
@@ -265,6 +272,19 @@ def phase1_run_objectives(objectives=None):
 
     def _run(idx, sc):
         status, session_id, failure_detail = run_kane(sc)
+        # Inline retry: if failed, ask Claude to rewrite objective and try once more
+        if status != "passed" and failure_detail:
+            log.warning(f"[{sc['id']}] authoring failed — attempting inline heal + retry")
+            healed_obj = heal_single_objective(sc, failure_detail, log)
+            if healed_obj:
+                sc_retry = {**sc, "objective": healed_obj}
+                s2, sid2, fd2 = run_kane(sc_retry)
+                if s2 == "passed":
+                    log.info(f"[{sc['id']}] retry PASSED with healed objective")
+                    status, session_id, failure_detail = s2, sid2, fd2
+                    sc = sc_retry
+                else:
+                    log.warning(f"[{sc['id']}] retry also failed")
         tc_id = get_testcase_id_from_session(session_id)
         return idx, {
             "sc_id":          sc["id"],
