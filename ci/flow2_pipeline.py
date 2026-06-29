@@ -431,10 +431,14 @@ def phase2_fetch_test_cases(kane_results):
     print("PHASE 2 — Fetching TM test cases by session IDs (code generated)")
     print("="*60)
 
-    # Collect testcase_ids from session.json (== TM test_case_id)
-    testcase_ids = [r["testcase_id"] for r in kane_results if r.get("testcase_id")]
+    # Collect testcase_ids only from PASSED sessions — skip failed authoring runs
+    passed = [r for r in kane_results if r.get("status") == "passed" and r.get("testcase_id")]
+    failed_count = sum(1 for r in kane_results if r.get("status") != "passed")
+    if failed_count:
+        print(f"  Skipping {failed_count} failed authoring run(s) — only passed test cases go to HyperExecute")
+    testcase_ids = [r["testcase_id"] for r in passed]
     if not testcase_ids:
-        print("  No testcase_ids collected from sessions — cannot proceed")
+        print("  No passed testcase_ids — cannot proceed")
         return []
 
     print(f"  Looking for {len(testcase_ids)} test case(s) in TM project...")
