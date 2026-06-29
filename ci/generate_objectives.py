@@ -1,149 +1,198 @@
 #!/usr/bin/env python3
 """
-Generate kane-cli objectives from requirements using Claude.
+Generate kane-cli run objectives using kane-cli generate (KaneAI test case generator).
 
-Reads requirements/analyzed_requirements.json (acceptance criteria + steps),
-calls Claude to write a precise kane-cli objective string per AC,
-and writes the result to ci/objectives.json for use by flow1/flow2 pipelines.
+kane-cli generate produces structured test cases (scenarios + steps) from a natural-language
+prompt and optional requirements file. This script calls it in --agent mode, parses the
+generate_snapshot NDJSON event, converts each test case's kane_steps into a single
+objective string for kane-cli run, and writes ci/objectives.json.
 
 Usage:
     python3 ci/generate_objectives.py
-    python3 ci/generate_objectives.py --dry-run   # print without writing
-
-Requirements:
-    pip install anthropic
-    ANTHROPIC_API_KEY env var set
+    python3 ci/generate_objectives.py --url https://myapp.com
+    python3 ci/generate_objectives.py --url https://myapp.com --requirements /path/to/reqs.json
+    python3 ci/generate_objectives.py --url https://myapp.com --requirements https://host/reqs.json
+    python3 ci/generate_objectives.py --limit 3 --dry-run
 """
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
-try:
-    import anthropic
-except ImportError:
-    print("ERROR: anthropic package not installed. Run: pip install anthropic", file=sys.stderr)
-    sys.exit(1)
-
-# ── Config ────────────────────────────────────────────────────────────────────
-PROJECT_ROOT   = Path(__file__).parent.parent
-REQUIREMENTS   = PROJECT_ROOT / "requirements" / "analyzed_requirements.json"
-USER_STORIES   = PROJECT_ROOT / "requirements" / "user-stories.md"
-OUTPUT_FILE    = Path(__file__).parent / "objectives.json"
-BASE_URL       = "https://www.saucedemo.com/"
-MODEL          = "claude-sonnet-4-6"
+PROJECT_ROOT     = Path(__file__).parent.parent
+DEFAULT_REQS     = PROJECT_ROOT / "scenarios" / "scenarios.json"
+OUTPUT_FILE      = Path(__file__).parent / "objectives.json"
+DEFAULT_URL      = "https://www.saucedemo.com/"
+KANE_TIMEOUT     = 120  # seconds to wait for generation
 
 
-SYSTEM_PROMPT = """\
-You are a QA automation expert who writes precise browser test objectives for kane-cli.
 
-kane-cli takes a single natural-language objective string and executes it as a
-headless browser test. A good objective:
-- Starts with the full URL to navigate to
-- Lists the exact UI actions in order (click, fill, select, etc.)
-- Ends with a specific, observable assertion (cart badge count, text visible, button label)
-- Is concise — one sentence, no bullet points
-- Uses concrete details from the site (button labels, field names, visible text)
-- Keeps the total number of distinct UI actions to 5 or fewer — kane-cli has a limited step budget
+def load_requirements_doc(reqs_path: str) -> tuple:
+    """
+    Load requirements from file. Returns (base_url, ac_list).
+    Supports three formats:
+      - scenarios.json array: [{kane_url, source_description, steps, ...}, ...]
+      - Object wrapper:       {"base_url": "...", "acceptance_criteria": [...]}
+      - Legacy AC array:      [{"id": "AC-001", "description": ...}, ...]
+    """
+    data = json.loads(Path(reqs_path).read_text())
 
-The site under test is www.saucedemo.com. Key UI facts:
-- Login page: https://www.saucedemo.com/ — username: 'standard_user', password: 'secret_sauce'
-- After login the inventory page https://www.saucedemo.com/inventory.html shows product tiles
-- Each product tile has an 'Add to cart' button; after clicking it the button changes to 'Remove'
-- Cart badge (top-right nav) shows item count after adding a product
-- Cart page: https://www.saucedemo.com/cart.html — click the cart icon to navigate there
-- Sort dropdown (top-right of inventory): 'Name (A to Z)', 'Name (Z to A)',
-  'Price (low to high)', 'Price (high to low)'
-- Cheapest product when sorted low-to-high: 'Sauce Labs Onesie' at $7.99
-- Alphabetically first product (A to Z): 'Sauce Labs Backpack'
-- Product detail page: click the product name or image on the inventory page
-- NO search bar, NO category sidebar, NO add-to-cart modal popups
+    # Object wrapper format
+    if isinstance(data, dict):
+        return data.get("base_url"), data.get("acceptance_criteria", [])
 
-CRITICAL RULES — violating these causes known test failures:
-1. ALWAYS start from https://www.saucedemo.com/ and log in: type username (1 action),
-   type password (2), click Login (3). These 3 steps count toward the 5-action budget.
-2. Maximum 5 UI actions before the final assertion — kane-cli has a strict step limit.
-3. For cart count test: login(3) + click Add to cart(1) = 4 actions → assert badge shows 1.
-4. For cart page test: login(3) + add to cart(1) + click cart icon(1) = 5 → assert name/price.
-5. For remove test: login(3) + add to cart(1) + click Remove on inventory(1) = 5 → assert badge gone.
-6. For sort test: login(3) + open sort dropdown(1) + select option(1) = 5 → assert first product.
-7. NEVER assert on a cart total sum — assert on individual product prices only.
-"""
+    # scenarios.json format — array with kane_url per item
+    if data and "kane_url" in data[0]:
+        base_url = data[0]["kane_url"]
+        ac_list = [
+            {
+                "id":           s.get("requirement_id") or s.get("id", f"AC-{i+1:03d}"),
+                "description":  s.get("source_description", s.get("title", "")),
+                "kane_steps":   s.get("steps", []),
+                "kane_one_liner": s.get("expected_result", ""),
+            }
+            for i, s in enumerate(data)
+        ]
+        return base_url, ac_list
+
+    # Legacy AC array
+    return None, data
 
 
-def generate_objective(client: anthropic.Anthropic, ac: dict) -> str:
-    """Ask Claude to write a kane-cli objective for one acceptance criterion."""
-    prompt = f"""Write a single kane-cli objective string for this acceptance criterion.
+def build_prompt(base_url: str, ac_list: list) -> str:
+    """Build the generation prompt from URL + AC summaries."""
+    prompt = f"Generate end-to-end browser test scenarios for the application at {base_url}"
+    if ac_list:
+        summaries = [f"{r['id']}: {r['description']}" for r in ac_list[:10]]
+        prompt += ". Requirements: " + " | ".join(summaries)
+    return prompt
 
-Acceptance Criterion ID: {ac['id']}
-Description: {ac['description']}
-Steps hint: {', '.join(ac.get('kane_steps', []))}
-One-liner summary: {ac.get('kane_one_liner', '')}
 
-Site base URL: {BASE_URL}
+def run_kane_generate(prompt: str, limit: int, files_arg=None) -> list[dict]:
+    """
+    Run kane-cli generate --agent and parse the generate_snapshot event.
+    Returns list of test case dicts: {title, objective, sc_id, name}
+    """
+    cmd = [
+        "kane-cli", "generate", prompt,
+        "--agent",
+        "--scenario-limit", str(limit),
+        "--per-scenario-limit", "1",
+    ]
+    if files_arg:
+        cmd += ["--files", files_arg]
 
-Return ONLY the objective string — no quotes, no explanation, no prefix."""
+    print(f"Running: {' '.join(cmd[:5])} ...")
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=KANE_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: kane-cli generate timed out after {KANE_TIMEOUT}s", file=sys.stderr)
+        sys.exit(1)
 
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=256,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return message.content[0].text.strip()
+    combined = result.stdout + "\n" + result.stderr
+    snapshot = None
+    done_ev  = None
+
+    for line in combined.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if ev.get("type") == "generate_snapshot":
+            snapshot = ev
+        elif ev.get("type") == "generate_done":
+            done_ev = ev
+
+    if not snapshot:
+        print("ERROR: no generate_snapshot event received. Raw output:", file=sys.stderr)
+        print(combined[-2000:], file=sys.stderr)
+        sys.exit(1)
+
+    if done_ev:
+        status = done_ev.get("status", "?")
+        print(f"generate_done: status={status}, scenarios={done_ev.get('scenario_count')}, "
+              f"cases={done_ev.get('case_count')}")
+
+    return extract_objectives(snapshot)
+
+
+def steps_to_objective(kane_steps: list) -> str:
+    """Convert kane_steps[].c (action strings) into a single run objective."""
+    actions = [s["c"].rstrip(".") for s in kane_steps if s.get("c")]
+    return "; ".join(actions) + "."
+
+
+def extract_objectives(snapshot: dict) -> list[dict]:
+    """Extract one objective per scenario (first test case) from generate_snapshot."""
+    objectives = []
+    for i, scenario in enumerate(snapshot.get("scenarios", []), 1):
+        sc_id = f"SC-{i:03d}"
+        title = scenario.get("title", sc_id)
+        for tc in scenario.get("test_cases", [])[:1]:  # one test case per scenario
+            steps    = tc.get("kane_steps", [])
+            objective = steps_to_objective(steps) if steps else tc.get("description", "")
+            objectives.append({
+                "id":        sc_id,
+                "tc_id":     str(tc.get("id", "")),
+                "name":      f"{sc_id}: {title}",
+                "objective": objective,
+            })
+            break
+    return objectives
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Generate kane-cli objectives via kane-cli generate"
+    )
+    parser.add_argument("--url", default=None,
+                        help="Override app base URL (auto-read from requirements doc if not set)")
+    parser.add_argument("--requirements", default=None,
+                        help="Path to requirements JSON (default: scenarios/scenarios.json)")
+    parser.add_argument("--limit", type=int, default=5,
+                        help="Max scenarios to generate (default: 5)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print objectives without writing to file")
-    parser.add_argument("--ids", nargs="+",
-                        help="Only generate for specific AC IDs e.g. AC-001 AC-004")
-    parser.add_argument("--limit", type=int, default=5,
-                        help="Max number of objectives to generate (default: 5)")
     args = parser.parse_args()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY env var not set", file=sys.stderr)
+    # Resolve requirements file
+    reqs_path = args.requirements or str(DEFAULT_REQS)
+    if not Path(reqs_path).exists():
+        print(f"ERROR: requirements file not found: {reqs_path}", file=sys.stderr)
         sys.exit(1)
 
-    if not REQUIREMENTS.exists():
-        print(f"ERROR: {REQUIREMENTS} not found", file=sys.stderr)
+    # Read URL from requirements doc; --url overrides
+    doc_url, ac_list = load_requirements_doc(reqs_path)
+    base_url = args.url or doc_url or DEFAULT_URL
+
+    if not args.url and doc_url:
+        print(f"URL read from requirements doc: {base_url}")
+    elif args.url:
+        print(f"URL overridden via --url: {base_url}")
+    else:
+        print(f"URL fallback (not in doc): {base_url}")
+
+    prompt = build_prompt(base_url, ac_list)
+
+    print(f"Requirements: {reqs_path}")
+    print(f"Limit       : {args.limit} scenarios\n")
+
+    objectives = run_kane_generate(prompt, args.limit, reqs_path)
+
+    if not objectives:
+        print("ERROR: no objectives extracted from generation output.", file=sys.stderr)
         sys.exit(1)
 
-    requirements = json.loads(REQUIREMENTS.read_text())
-
-    if args.ids:
-        requirements = [r for r in requirements if r["id"] in args.ids]
-        if not requirements:
-            print(f"ERROR: none of {args.ids} found in requirements", file=sys.stderr)
-            sys.exit(1)
-
-    if not args.ids and args.limit:
-        requirements = requirements[:args.limit]
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    print(f"Generating objectives for {len(requirements)} acceptance criteria...")
-    print(f"Model: {MODEL}\n")
-
-    objectives = []
-    for i, ac in enumerate(requirements, 1):
-        print(f"  [{i}/{len(requirements)}] {ac['id']}: {ac['description'][:60]}...")
-        objective = generate_objective(client, ac)
-        sc_id = f"SC-{int(ac['id'].split('-')[1]):03d}"
-        entry = {
-            "id":        sc_id,
-            "ac_id":     ac["id"],
-            "name":      f"{sc_id}: {ac.get('kane_one_liner', ac['description'][:50])}",
-            "objective": objective,
-        }
-        objectives.append(entry)
-        print(f"           → {objective[:100]}...")
-
-    print(f"\nGenerated {len(objectives)} objectives.")
+    print(f"\nGenerated {len(objectives)} objectives:")
+    for o in objectives:
+        print(f"  {o['id']}: {o['objective'][:100]}...")
 
     if args.dry_run:
         print("\n--- objectives.json (dry run) ---")
@@ -151,8 +200,8 @@ def main():
         return
 
     OUTPUT_FILE.write_text(json.dumps(objectives, indent=2))
-    print(f"Written to {OUTPUT_FILE}")
-    print("\nNext step: run flow1 or flow2 pipeline — they will auto-load objectives.json")
+    print(f"\nWritten to {OUTPUT_FILE}")
+    print("Next step: python3 ci/flow1_pipeline.py  or  python3 ci/flow2_pipeline.py")
 
 
 if __name__ == "__main__":

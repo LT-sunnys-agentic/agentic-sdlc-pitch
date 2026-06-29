@@ -42,26 +42,21 @@ Key facts about www.saucedemo.com:
 - After login, inventory page: https://www.saucedemo.com/inventory.html
 - Each product tile has an 'Add to cart' button; after clicking it the button text changes to 'Remove'
 - Cart badge appears in top-right navigation showing item count
-- Cart page: https://www.saucedemo.com/cart.html — accessible by clicking the cart icon
+- Cart page: https://www.saucedemo.com/cart.html — navigate directly by URL, do not click cart icon
 - Sort dropdown (top-right of inventory): options include 'Name (A to Z)', 'Name (Z to A)',
   'Price (low to high)', 'Price (high to low)'
 - Cheapest product: 'Sauce Labs Onesie' at $7.99; alphabetically first: 'Sauce Labs Backpack'
 - Product detail page: click the product name or image from inventory
 - NO search bar, NO category sidebar, NO modals after add-to-cart
 
-CRITICAL RULES — these patterns cause known failures, do not reproduce them:
+RULES for rewriting:
 1. ALWAYS start from https://www.saucedemo.com/ and log in first — no page is accessible without login.
-2. Login steps count toward the 5-action budget: type username (1), type password (2), click Login (3).
-3. Maximum 5 UI actions before the final assertion — kane-cli has a strict step limit.
-4. NEVER assert on cart badge count (e.g. "badge shows 1") — the agent cannot reliably count badge numbers.
-   Instead assert the button text changed: after clicking Add to cart, assert button reads 'Remove'.
-5. For cart page verification: after add to cart, navigate directly to https://www.saucedemo.com/cart.html
-   and assert a specific product name (e.g. 'Sauce Labs Backpack') or price (e.g. '$29.99') is visible.
-6. For remove verification: login(3) + add to cart(1) + click Remove(1) = 5 actions → assert button reads 'Add to cart'.
-7. NEVER click the cart icon/badge to navigate — navigate directly to https://www.saucedemo.com/cart.html.
-8. For sort verification: login(3) + click sort dropdown(1) + select option(1) = 5 → assert first product name or price.
-9. Use specific product name 'Sauce Labs Backpack' and price '$29.99' in assertions — these are stable.
-10. One sentence only, starts with the full URL (https://www.saucedemo.com/), ends with a specific assertion.
+2. Be specific about element targets — reference visible button text, labels, or position hints.
+3. NEVER assert on cart badge count — assert the button text changed (e.g. reads 'Remove').
+4. For cart page: navigate directly to https://www.saucedemo.com/cart.html, assert product name or price.
+5. Use specific stable values: product name 'Sauce Labs Backpack', price '$29.99'.
+6. Up to 20 UI actions are allowed — do not artificially restrict steps.
+7. One sentence only, starts with the full URL (https://www.saucedemo.com/), ends with a specific assertion.
 """
 
 

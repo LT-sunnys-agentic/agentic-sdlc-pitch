@@ -168,6 +168,7 @@ def run_kane(sc):
         "--code-export",
         "--code-language", "python",
         "--skip-code-validation",
+        "--max-steps", "20",
         "--timeout", str(KANE_TIMEOUT),
     ]
     try:
