@@ -9,6 +9,14 @@ name: "Flow 2 — KaneAI TM API"
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "requirements/**"
+      - "ci/**"
+      - "scenarios/**"
+      - "hyperexecute.yaml"
+      - ".github/workflows/flow2.yml"
   workflow_dispatch:
     inputs:
       requirements_url:
@@ -18,7 +26,7 @@ on:
       from_step:
         description: "Start from step (1=analyze reqs, 2=gen objectives, 3=flow2 pipeline)"
         required: false
-        default: "1"
+        default: "3"
         type: choice
         options: ["1", "2", "3"]
 
@@ -105,13 +113,13 @@ jobs:
           head -20 "$FILENAME"
 
       - name: "Step 1 — Analyze requirements (Claude)"
-        if: ${{ inputs.from_step == '' || inputs.from_step <= '1' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.from_step == '' || inputs.from_step <= '1') }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 -u ci/analyze_requirements.py
 
       - name: "Step 2 — Generate kane-cli objectives (Claude)"
-        if: ${{ inputs.from_step == '' || inputs.from_step <= '2' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.requirements_url != '' && (inputs.from_step == '' || inputs.from_step <= '2') }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 -u ci/generate_objectives.py

@@ -1,203 +1,146 @@
 #!/usr/bin/env python3
 """
-Generate kane-cli run objectives using kane-cli generate (KaneAI test case generator).
+Step 2 — Generate kane-cli run objectives from analyzed ACs (Claude-powered).
 
-kane-cli generate produces structured test cases (scenarios + steps) from a natural-language
-prompt and optional requirements file. This script calls it in --agent mode, parses the
-generate_snapshot NDJSON event, converts each test case's kane_steps into a single
-objective string for kane-cli run, and writes ci/objectives.json.
+Reads requirements/analyzed_requirements.json (output of analyze_requirements.py)
+and uses Claude to produce crisp, intent-based objectives for each AC.
+
+Objective format (enforced):
+  "Login to <url> as <user> with password <pass>, <one action>, and verify <one assertion>."
+
+Each objective is short, high-level, and unambiguous — no micro-steps, no spatial
+hints, no price coordinates. kane-cli authors the test steps itself.
+
+Output: ci/objectives.json
 
 Usage:
-    python3 ci/generate_objectives.py
-    python3 ci/generate_objectives.py --url https://myapp.com
-    python3 ci/generate_objectives.py --url https://myapp.com --requirements /path/to/reqs.json
-    python3 ci/generate_objectives.py --url https://myapp.com --requirements https://host/reqs.json
-    python3 ci/generate_objectives.py --limit 3 --dry-run
+    ANTHROPIC_API_KEY=<key> python3 ci/generate_objectives.py
+    python3 ci/generate_objectives.py --dry-run
 """
-import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_ROOT     = Path(__file__).parent.parent
-DEFAULT_REQS     = PROJECT_ROOT / "scenarios" / "scenarios.json"
-OUTPUT_FILE      = Path(__file__).parent / "objectives.json"
-DEFAULT_URL      = "https://www.saucedemo.com/"
-KANE_TIMEOUT     = 120  # seconds to wait for generation
+PROJECT_ROOT    = Path(__file__).parent.parent
+ANALYZED_FILE   = PROJECT_ROOT / "requirements" / "analyzed_requirements.json"
+OUTPUT_FILE     = Path(__file__).parent / "objectives.json"
+MODEL           = "claude-sonnet-4-6"
 
+OBJECTIVES_PROMPT = """\
+You are a QA engineer writing test objectives for a browser automation tool called KaneAI.
 
+KaneAI takes a plain-English objective and autonomously authors a browser test. The objective
+must be short, intent-based, and unambiguous. KaneAI figures out the exact clicks — you must
+NOT include step-by-step instructions, spatial hints, price coordinates, or UI element details.
 
-def load_requirements_doc(reqs_path: str) -> tuple:
-    """
-    Load requirements from file. Returns (base_url, ac_list).
-    Supports three formats:
-      - scenarios.json array: [{kane_url, source_description, steps, ...}, ...]
-      - Object wrapper:       {"base_url": "...", "acceptance_criteria": [...]}
-      - Legacy AC array:      [{"id": "AC-001", "description": ...}, ...]
-    """
-    data = json.loads(Path(reqs_path).read_text())
+FORMAT RULES (strict):
+- One sentence per objective
+- Start with login (include URL, username, password inline if the app requires login)
+- State ONE action after login
+- End with ONE "and verify ..." assertion
+- No bullet points, no numbered steps, no "then", no "next", no "after that"
+- Max 30 words
 
-    # Object wrapper format
-    if isinstance(data, dict):
-        return data.get("base_url"), data.get("acceptance_criteria", [])
+GOOD examples (follow this style exactly):
+  "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, and verify the button changes to 'Remove'."
+  "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, remove it, and verify the button returns to 'Add to cart'."
+  "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, sort the product list by Price low to high, and verify the first product shows price $7.99."
 
-    # scenarios.json format — array with kane_url per item
-    if data and "kane_url" in data[0]:
-        base_url = data[0]["kane_url"]
-        ac_list = [
-            {
-                "id":           s.get("requirement_id") or s.get("id", f"AC-{i+1:03d}"),
-                "description":  s.get("source_description", s.get("title", "")),
-                "kane_steps":   s.get("steps", []),
-                "kane_one_liner": s.get("expected_result", ""),
-            }
-            for i, s in enumerate(data)
-        ]
-        return base_url, ac_list
+BAD (never do this):
+  "Navigate to the URL, type username into the username input, type password into the password input, click Login button, click Add to cart below $29.99 price..."
 
-    # Legacy AC array
-    return None, data
+App URL: {base_url}
+App credentials: username={username}, password={password}
 
+Acceptance Criteria:
+{ac_text}
 
-def build_prompt(base_url: str, ac_list: list) -> str:
-    """Build the generation prompt from URL + AC summaries."""
-    prompt = f"Generate end-to-end browser test scenarios for the application at {base_url}"
-    if ac_list:
-        summaries = [f"{r['id']}: {r['description']}" for r in ac_list[:10]]
-        prompt += ". Requirements: " + " | ".join(summaries)
-    return prompt
-
-
-def run_kane_generate(prompt: str, limit: int, files_arg=None) -> list[dict]:
-    """
-    Run kane-cli generate --agent and parse the generate_snapshot event.
-    Returns list of test case dicts: {title, objective, sc_id, name}
-    """
-    cmd = [
-        "kane-cli", "generate", prompt,
-        "--agent",
-        "--scenario-limit", str(limit),
-        "--per-scenario-limit", "1",
-    ]
-    if files_arg:
-        cmd += ["--files", files_arg]
-
-    print(f"Running: {' '.join(cmd[:5])} ...")
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=KANE_TIMEOUT
-        )
-    except subprocess.TimeoutExpired:
-        print(f"ERROR: kane-cli generate timed out after {KANE_TIMEOUT}s", file=sys.stderr)
-        sys.exit(1)
-
-    combined = result.stdout + "\n" + result.stderr
-    snapshot = None
-    done_ev  = None
-
-    for line in combined.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            ev = json.loads(line)
-        except Exception:
-            continue
-        if ev.get("type") == "generate_snapshot":
-            snapshot = ev
-        elif ev.get("type") == "generate_done":
-            done_ev = ev
-
-    if done_ev:
-        status = done_ev.get("status", "?")
-        print(f"generate_done: status={status}, scenarios={done_ev.get('scenario_count')}, "
-              f"cases={done_ev.get('case_count')}")
-
-    if not snapshot:
-        print("[generate] WARNING: no generate_snapshot event — kane-cli generate produced no output",
-              file=sys.stderr)
-        return []
-
-    return extract_objectives(snapshot)
-
-
-def steps_to_objective(kane_steps: list) -> str:
-    """Convert kane_steps[].c (action strings) into a single run objective."""
-    actions = [s["c"].rstrip(".") for s in kane_steps if s.get("c")]
-    return "; ".join(actions) + "."
-
-
-def extract_objectives(snapshot: dict) -> list[dict]:
-    """Extract one objective per scenario (first test case) from generate_snapshot."""
-    objectives = []
-    for i, scenario in enumerate(snapshot.get("scenarios", []), 1):
-        sc_id = f"SC-{i:03d}"
-        title = scenario.get("title", sc_id)
-        for tc in scenario.get("test_cases", [])[:1]:  # one test case per scenario
-            steps    = tc.get("kane_steps", [])
-            objective = steps_to_objective(steps) if steps else tc.get("description", "")
-            objectives.append({
-                "id":        sc_id,
-                "tc_id":     str(tc.get("id", "")),
-                "name":      f"{sc_id}: {title}",
-                "objective": objective,
-            })
-            break
-    return objectives
+Return ONLY a JSON array — no preamble, no explanation:
+[
+  {{"id": "SC-001", "ac_id": "AC-001", "name": "SC-001: <short name>", "objective": "<crisp objective>"}},
+  ...
+]
+Number SCs sequentially starting from SC-001. Generate AT MOST 5 objectives — pick the most critical testable behaviours if there are more than 5 ACs.
+"""
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate kane-cli objectives via kane-cli generate"
-    )
-    parser.add_argument("--url", default=None,
-                        help="Override app base URL (auto-read from requirements doc if not set)")
-    parser.add_argument("--requirements", default=None,
-                        help="Path to requirements JSON (default: scenarios/scenarios.json)")
-    parser.add_argument("--limit", type=int, default=5,
-                        help="Max scenarios to generate (default: 5)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print objectives without writing to file")
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate crisp objectives from analyzed ACs")
+    parser.add_argument("--dry-run", action="store_true", help="Print without writing")
     args = parser.parse_args()
 
-    # Resolve requirements file
-    reqs_path = args.requirements or str(DEFAULT_REQS)
-    if not Path(reqs_path).exists():
-        print(f"ERROR: requirements file not found: {reqs_path}", file=sys.stderr)
+    # Load analyzed requirements
+    if not ANALYZED_FILE.exists():
+        print(f"ERROR: {ANALYZED_FILE} not found — run analyze_requirements.py first", file=sys.stderr)
         sys.exit(1)
 
-    # Read URL from requirements doc; --url overrides
-    doc_url, ac_list = load_requirements_doc(reqs_path)
-    base_url = args.url or doc_url or DEFAULT_URL
+    analyzed = json.loads(ANALYZED_FILE.read_text())
+    base_url  = analyzed.get("base_url", "https://www.saucedemo.com/")
+    acs       = analyzed.get("acceptance_criteria", [])
 
-    if not args.url and doc_url:
-        print(f"URL read from requirements doc: {base_url}")
-    elif args.url:
-        print(f"URL overridden via --url: {base_url}")
-    else:
-        print(f"URL fallback (not in doc): {base_url}")
-
-    prompt = build_prompt(base_url, ac_list)
-
-    print(f"Requirements: {reqs_path}")
-    print(f"Limit       : {args.limit} scenarios\n")
-
-    objectives = run_kane_generate(prompt, args.limit, reqs_path)
-
-    if not objectives:
-        if OUTPUT_FILE.exists():
-            print(f"[generate] WARNING: kane-cli generate returned 0 scenarios — "
-                  f"using existing {OUTPUT_FILE.name} as fallback")
-            return  # keep existing objectives.json, exit cleanly
-        print("ERROR: no objectives extracted and no existing objectives.json to fall back to.",
-              file=sys.stderr)
+    if not acs:
+        print("ERROR: no acceptance criteria found in analyzed_requirements.json", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nGenerated {len(objectives)} objectives:")
+    # Extract credentials from ACs if present, else use saucedemo defaults
+    ac_text = "\n".join(
+        f"  {ac['id']}: {ac['description']}" for ac in acs
+    )
+    # Heuristic: look for credentials in analyzed text
+    username = "standard_user"
+    password = "secret_sauce"
+    for ac in acs:
+        desc = ac.get("description", "").lower()
+        steps = " ".join(ac.get("kane_steps", [])).lower()
+        combined = desc + " " + steps
+        if "standard_user" in combined:
+            username = "standard_user"
+        if "secret_sauce" in combined:
+            password = "secret_sauce"
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        print("ERROR: ANTHROPIC_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        import anthropic
+    except ImportError:
+        print("ERROR: anthropic package not installed. Run: pip install anthropic", file=sys.stderr)
+        sys.exit(1)
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = OBJECTIVES_PROMPT.format(
+        base_url=base_url,
+        username=username,
+        password=password,
+        ac_text=ac_text,
+    )
+
+    print(f"[objectives] Generating objectives for {len(acs)} ACs with Claude ({MODEL})...")
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = resp.content[0].text.strip()
+
+    # Strip markdown fences if present
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+
+    try:
+        objectives = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Claude returned invalid JSON: {e}\n{raw[:400]}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n[objectives] Generated {len(objectives)} objectives:")
     for o in objectives:
-        print(f"  {o['id']}: {o['objective'][:100]}...")
+        print(f"  {o['id']}: {o['objective']}")
 
     if args.dry_run:
         print("\n--- objectives.json (dry run) ---")
@@ -205,8 +148,7 @@ def main():
         return
 
     OUTPUT_FILE.write_text(json.dumps(objectives, indent=2))
-    print(f"\nWritten to {OUTPUT_FILE}")
-    print("Next step: python3 ci/flow1_pipeline.py  or  python3 ci/flow2_pipeline.py")
+    print(f"\n[objectives] Written to {OUTPUT_FILE.name}")
 
 
 if __name__ == "__main__":

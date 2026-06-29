@@ -5,13 +5,8 @@ name: "Flow 1 — KaneAI Code Export"
 #         → Playwright code export → HyperExecute → AI RCA → Traceability
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Flow 1 is disabled from CI — use internally / run manually only.
 on:
-  push:
-    paths:
-      - "requirements/**"
-      - "ci/**"
-      - "hyperexecute.yaml"
-      - ".github/workflows/flow1.yml"
   workflow_dispatch:
     inputs:
       requirements_url:

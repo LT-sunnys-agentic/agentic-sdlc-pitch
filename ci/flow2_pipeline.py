@@ -50,7 +50,7 @@ HE_API        = "https://test-manager-api.lambdatest.com/api/atm/v1/hyperexecute
 PROJECT_ID    = "01KVXJ82AKT83GWJNFZTQVMNRQ"   # kane-agentic
 ENVIRONMENT_ID = 282603                           # Windows Config — Win10, Firefox 150, desktop web
 BASE_URL      = "https://www.saucedemo.com/"
-KANE_TIMEOUT  = 300   # seconds per kane-cli run
+KANE_TIMEOUT  = 600   # seconds per kane-cli run (10 min — let kane-cli use its own default)
 BUILD_NAME    = f"Agentic SDLC | KaneAI Flow2 | {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
 
 # ── SC Objectives — loaded from Claude-generated objectives.json if present ───
@@ -149,13 +149,12 @@ def run_kane(sc):
         "--code-export",
         "--code-language", "python",
         "--skip-code-validation",
-        "--timeout", str(KANE_TIMEOUT),
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KANE_TIMEOUT + 60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KANE_TIMEOUT)
     except subprocess.TimeoutExpired:
-        detail = f"Timeout after {KANE_TIMEOUT + 60}s"
+        detail = f"Timeout after {KANE_TIMEOUT}s"
         log.failure(sc_id, "TIMEOUT", detail=detail)
         return None, None, detail
 
