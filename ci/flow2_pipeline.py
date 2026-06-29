@@ -366,8 +366,7 @@ def phase1_run_objectives(objectives=None):
     results = [None] * len(objs)
 
     # Infrastructure failure keywords: only genuine transient browser/CDP issues.
-    # Keep narrow — broad matches (e.g. bare "screenshot") cause false positives
-    # that trigger unnecessary retries and get stuck on bifurcation.
+    # Keep narrow — broad matches cause false positives that get stuck on bifurcation.
     _INFRA_KEYWORDS = (
         "screenshot failed",       # explicit screenshot capture crash
         "cdp disconnected",        # Chrome DevTools Protocol lost
@@ -376,6 +375,7 @@ def phase1_run_objectives(objectives=None):
         "socket hang up",
         "econnreset",
         "net::err_",               # Chrome network errors
+        '"recording_state"',       # kane-cli exited before run_end — session rejected/crashed at start
     )
 
     def _is_infra_failure(detail: str) -> bool:
@@ -419,7 +419,11 @@ def phase1_run_objectives(objectives=None):
         }
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        futures = {ex.submit(_run, i, sc): i for i, sc in enumerate(objs)}
+        futures = {}
+        for i, sc in enumerate(objs):
+            if i > 0:
+                time.sleep(3)   # stagger starts to avoid hitting LT concurrency limit simultaneously
+            futures[ex.submit(_run, i, sc)] = i
         for fut in as_completed(futures):
             idx, entry = fut.result()
             results[idx] = entry
