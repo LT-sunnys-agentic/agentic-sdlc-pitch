@@ -12,12 +12,6 @@ on:
   push:
     branches: [main]
     # [skip ci] in commit message prevents infinite loop from auto-improve commits
-    paths:
-      - "requirements/**"
-      - "ci/**"
-      - "scenarios/**"
-      - "hyperexecute.yaml"
-      - ".github/workflows/flow2.yml"
   workflow_dispatch:
     inputs:
       requirements_url:

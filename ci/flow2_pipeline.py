@@ -161,10 +161,12 @@ def tm_request(method, path, payload=None):
 
 
 def run_kane(sc):
-    """Run a single kane-cli objective. Returns (status, session_id, failure_detail)."""
+    """Run a single kane-cli objective. Streams NDJSON events in real-time. Returns (status, session_id, failure_detail)."""
+    import threading
+
     sc_id  = sc["id"]
     obj    = sc["objective"]
-    log.info(f"[{sc_id}] {obj[:80]}...")
+    log.info(f"[{sc_id}] Objective: {obj}")
 
     cmd = [
         "kane-cli", "run", obj,
@@ -176,64 +178,125 @@ def run_kane(sc):
         "--skip-code-validation",
     ]
 
+    # ── Streaming helpers ─────────────────────────────────────────────────────
+    # Event types to log in real-time (step-level authoring progress)
+    _STEP_TYPES = {
+        "step_start", "step_end", "action_start", "action_end",
+        "navigate", "click", "fill", "select", "type", "scroll",
+        "assertion", "verify", "check", "hover", "wait",
+        "screenshot", "log", "error", "warning",
+    }
+    _SKIP_TYPES = {"debug", "trace", "heartbeat", "ping"}
+
+    def _log_event(ev):
+        ev_type = ev.get("type", "")
+        if ev_type in _SKIP_TYPES or not ev_type:
+            return
+        if ev_type == "run_end":
+            return  # logged after the loop
+
+        # Build a concise one-liner from the event
+        parts = []
+        for key in ("description", "message", "text", "action", "selector", "url", "value", "error"):
+            val = ev.get(key, "")
+            if val and isinstance(val, str):
+                parts.append(val[:120])
+                break
+        status_ev = ev.get("status", "")
+        step_no   = ev.get("step_no") or ev.get("step") or ev.get("index", "")
+        prefix    = f"step {step_no}: " if step_no else ""
+        suffix    = f" [{status_ev}]" if status_ev else ""
+        detail    = parts[0] if parts else str(ev)[:100]
+        log.info(f"  [{sc_id}] {ev_type}: {prefix}{detail}{suffix}")
+
+    # ── Launch process with timeout guard ────────────────────────────────────
+    all_lines = []
+    timed_out = False
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KANE_TIMEOUT)
-    except subprocess.TimeoutExpired:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except Exception as exc:
+        log.failure(sc_id, detail=str(exc))
+        return None, None, str(exc)
+
+    def _kill_on_timeout():
+        nonlocal timed_out
+        timed_out = True
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    timer = threading.Timer(KANE_TIMEOUT, _kill_on_timeout)
+    timer.start()
+
+    try:
+        log.info(f"  [{sc_id}] --- authoring started ---")
+        for raw_line in proc.stdout:
+            line = raw_line.rstrip("\n")
+            all_lines.append(line)
+            try:
+                ev = json.loads(line)
+                _log_event(ev)
+            except (json.JSONDecodeError, Exception):
+                if line.strip():
+                    log.info(f"  [{sc_id}] {line[:120]}")
+    finally:
+        timer.cancel()
+
+    proc.wait()
+    returncode = proc.returncode
+
+    if timed_out:
         detail = f"Timeout after {KANE_TIMEOUT}s"
         log.failure(sc_id, "TIMEOUT", detail=detail)
         return None, None, detail
 
+    # ── Parse final state from collected lines ────────────────────────────────
     status = session_id = session_dir = failure_detail = None
+    run_end_ev = None
+    events_seen = []
 
-    combined = result.stdout + "\n" + result.stderr
-    for line in combined.splitlines():
+    for line in all_lines:
         try:
             ev = json.loads(line)
+            events_seen.append(ev.get("type", "?"))
+            if ev.get("type") == "run_end":
+                run_end_ev  = ev
+                status      = ev.get("status")
+                session_dir = ev.get("session_dir", "")
+                if session_dir:
+                    session_id = Path(session_dir).name
+                # kane-cli sometimes exits 1 after assertion passes (code-export finalization)
+                if status == "failed" and session_dir:
+                    s = ev.get("summary", "").lower()
+                    if "passed" in s and any(w in s for w in ["check", "verified", "confirmed", "assert"]):
+                        log.info(f"[{sc_id}] assertion passed but kane-cli errored post-check — treating as passed")
+                        status = "passed"
+                break
         except Exception:
             continue
-        if ev.get("type") == "run_end":
-            status      = ev.get("status")
-            session_dir = ev.get("session_dir", "")
-            if session_dir:
-                session_id = Path(session_dir).name
-            # Override: kane-cli sometimes exits 1 after the assertion passes
-            # (during code-export / session finalization). Detect via summary.
-            if status == "failed" and session_dir:
-                s = ev.get("summary", "").lower()
-                if "passed" in s and any(w in s for w in ["check", "verified", "confirmed", "assert"]):
-                    log.info(f"[{sc_id}] assertion passed but kane-cli errored post-check — treating as passed")
-                    status = "passed"
-            break
+
+    log.info(f"  [{sc_id}] --- authoring ended --- exit={returncode} events=[{', '.join(events_seen)}]")
 
     if status == "passed":
         log.success(sc_id, f"session: {session_id}")
     else:
-        # Collect all event types + the run_end payload for diagnosis
-        events_seen = []
-        run_end_ev  = None
-        for line in combined.splitlines():
-            try:
-                ev = json.loads(line)
-                events_seen.append(ev.get("type", "?"))
-                if ev.get("type") == "run_end":
-                    run_end_ev = ev
-            except Exception:
-                continue
-
-        log.info(f"[{sc_id}] exit={result.returncode} stdout={len(result.stdout)}b stderr={len(result.stderr)}b")
-        log.info(f"[{sc_id}] events: {events_seen}")
         if run_end_ev:
-            log.info(f"[{sc_id}] run_end payload: {json.dumps(run_end_ev)[:400]}")
+            log.info(f"[{sc_id}] run_end: {json.dumps(run_end_ev)[:400]}")
 
-        # Build failure_detail: run_end summary (narrative) + raw tail
-        # Self-heal uses this to understand what the agent actually did
-        raw = (result.stdout + result.stderr).strip()
-        tail = raw[-800:] if len(raw) > 800 else raw
+        combined = "\n".join(all_lines).strip()
+        tail = combined[-800:] if len(combined) > 800 else combined
         run_end_summary = run_end_ev.get("summary", "") if run_end_ev else ""
         if run_end_summary:
             failure_detail = f"[run summary]: {run_end_summary}\n[raw tail]: {tail}"
         else:
-            failure_detail = tail if raw else f"No output (exit code {result.returncode})"
+            failure_detail = tail if combined else f"No output (exit code {returncode})"
         log.failure(sc_id, detail=failure_detail)
 
     return status, session_id, failure_detail
