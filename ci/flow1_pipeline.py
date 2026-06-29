@@ -60,7 +60,8 @@ def _is_cached(sc_id: str, cache: dict) -> bool:
     test_py = KANE_DIR / sc_id / "test.py"
     if not test_py.exists():
         return False
-    if "testmu.configure" not in test_py.read_text():
+    # If file still has old testmuai format it needs re-authoring
+    if "testmu.configure" in test_py.read_text():
         return False
     return sc_id in cache
 HE_BINARY     = PROJECT_ROOT / "hyperexecute"
@@ -193,7 +194,6 @@ def run_kane(sc):
         "--code-export",
         "--code-language", "python",
         "--skip-code-validation",
-        "--max-steps", "20",
         "--timeout", str(KANE_TIMEOUT),
     ]
     # Use Popen + process group so we can kill the entire tree (kane-cli spawns v16-runner children)
