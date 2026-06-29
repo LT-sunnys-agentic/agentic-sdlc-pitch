@@ -77,6 +77,8 @@ def _resolve_base_url() -> str:
 BASE_URL = _resolve_base_url()
 KANE_TIMEOUT  = 600   # seconds per kane-cli run (10 min — let kane-cli use its own default)
 BUILD_NAME    = f"Agentic SDLC | KaneAI Flow2 | {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
+# Sessions in LT dashboard use the BUILD env var from hyperexecute.yaml — must match for polling
+SESSION_BUILD_NAME = os.environ.get("BUILD", "Agentic SDLC | KaneAI Export")
 
 # ── SC Objectives — loaded from Claude-generated objectives.json if present ───
 _OBJECTIVES_FILE = Path(__file__).parent / "objectives.json"
@@ -661,13 +663,13 @@ if __name__ == "__main__":
         record_he_job("flow2", job_id, job_link, tm_report_url=tm_report_url)
 
         # Wait for HE job to finish before fetching results / running RCA
-        poll_he_job(job_id, BUILD_NAME, timeout=1800, log=log)
+        poll_he_job(job_id, SESSION_BUILD_NAME, timeout=1800, log=log)
 
         # Override run_history with actual HE pass/fail (not kane-cli Phase 1 status)
-        update_history_from_he(BUILD_NAME, flow="flow2", log=log)
+        update_history_from_he(SESSION_BUILD_NAME, flow="flow2", log=log)
 
         # RCA only for failed test sessions (skips automatically if triggered=0)
-        run_rca(job_id, build_name=BUILD_NAME, log=log)
+        run_rca(job_id, build_name=SESSION_BUILD_NAME, log=log)
 
     # Build traceability matrix after HE results are in
     run_traceability(log)
