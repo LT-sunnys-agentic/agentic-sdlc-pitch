@@ -120,6 +120,11 @@ jobs:
             [ -n "$RHASH" ] && cp "$RHASH" requirements/.requirements_hash && echo "Restored .requirements_hash"
             OHASH=$(find /tmp/prev-artifacts -name ".objectives_hash" | head -1)
             [ -n "$OHASH" ] && cp "$OHASH" ci/.objectives_hash && echo "Restored .objectives_hash"
+            # Restore TM test case IDs (both flows) — needed for Phase 1 reuse:
+            # if a SC's objective is unchanged and it has a valid TM test case,
+            # kane-cli is skipped entirely and the existing test case is reused.
+            TCS=$(find /tmp/prev-artifacts -name "tm_test_cases.json" | head -1)
+            [ -n "$TCS" ] && cp "$TCS" ci/tm_test_cases.json && echo "Restored tm_test_cases.json"
             # Custom URL runs only: restore healed objectives so cross-run heal and
             # hash-skip work across runs for the same URL. Default runs get objectives
             # from the repo (kept fresh by auto-improve commits) — never restored here.

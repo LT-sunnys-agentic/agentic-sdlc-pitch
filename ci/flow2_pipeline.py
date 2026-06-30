@@ -360,11 +360,34 @@ def fetch_tm_test_cases_by_ids(testcase_ids: list) -> list:
 
 # ── Phase 1: Run kane-cli objectives ─────────────────────────────────────────
 
+_TM_TC_FILE = Path(__file__).parent / "tm_test_cases.json"
+
+
+def _can_reuse(sc_id: str, objective: str, tm_tcs: dict, history: dict):
+    """
+    Return the existing TM test case ULID if we can skip kane-cli for this SC.
+    Conditions: valid TM test case exists + last authoring passed + objective unchanged.
+    """
+    tm_id = tm_tcs.get(sc_id, {}).get("tm_id", "")
+    if not tm_id:
+        return None
+    hist = history.get(sc_id, {})
+    if hist.get("authoring_status") != "passed":
+        return None
+    if hist.get("objective", "") != objective:
+        return None
+    return tm_id
+
+
 def phase1_run_objectives(objectives=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     log.phase("PHASE 1 — Running kane-cli objectives (parallel, max_workers=3)")
     objs = list(objectives or SC_OBJECTIVES)
     results = [None] * len(objs)
+
+    # Load existing TM test cases + history for reuse check
+    tm_tcs  = json.loads(_TM_TC_FILE.read_text()) if _TM_TC_FILE.exists() else {}
+    history = load_history()
 
     # Infrastructure failure keywords: only genuine transient browser/CDP issues.
     # Keep narrow — broad matches cause false positives that get stuck on bifurcation.
@@ -384,6 +407,27 @@ def phase1_run_objectives(objectives=None):
         return any(kw in d for kw in _INFRA_KEYWORDS)
 
     def _run(idx, sc):
+        sc_id     = sc["id"]
+        objective = sc.get("objective", "")
+
+        # ── Reuse check: skip kane-cli if objective unchanged + TM test case exists ──
+        tm_id = _can_reuse(sc_id, objective, tm_tcs, history)
+        if tm_id:
+            tc_internal = tm_tcs.get(sc_id, {}).get("internal_id", "")
+            log.info(f"[{sc_id}] ⏭ Reusing {tc_internal or tm_id} — objective unchanged, skipping kane-cli")
+            return idx, {
+                "sc_id":          sc_id,
+                "objective":      objective,
+                "status":         "passed",
+                "session_id":     None,
+                "testcase_id":    tm_id,
+                "failure_detail": "",
+                "healed":         False,
+                "reused":         True,
+            }
+
+        # ── Author with kane-cli ──────────────────────────────────────────────
+        log.info(f"[{sc_id}] Authoring with kane-cli (objective changed or no existing test case)")
         status, session_id, failure_detail = run_kane(sc)
         healed = False
 
@@ -410,13 +454,14 @@ def phase1_run_objectives(objectives=None):
                         log.warning(f"[{sc['id']}] retry also failed")
         tc_id = get_testcase_id_from_session(session_id)
         return idx, {
-            "sc_id":          sc["id"],
-            "objective":      sc.get("objective", ""),
+            "sc_id":          sc_id,
+            "objective":      objective,
             "status":         status,
             "session_id":     session_id,
             "testcase_id":    tc_id,
             "failure_detail": failure_detail or "",
             "healed":         healed,
+            "reused":         False,
         }
 
     with ThreadPoolExecutor(max_workers=3) as ex:
@@ -429,10 +474,13 @@ def phase1_run_objectives(objectives=None):
             idx, entry = fut.result()
             results[idx] = entry
 
-    passed = sum(1 for r in results if r["status"] == "passed")
-    log.info(f"Kane-cli runs: {passed}/{len(results)} passed")
+    passed  = sum(1 for r in results if r["status"] == "passed")
+    reused  = sum(1 for r in results if r.get("reused"))
+    authored = sum(1 for r in results if not r.get("reused"))
+    log.info(f"Kane-cli: {passed}/{len(results)} passed — {reused} reused (skipped kane-cli), {authored} authored")
     for r in results:
-        log.info(f"  {r['sc_id']}: {r['status']} | session: {r['session_id']} | tc_id: {r['testcase_id']}")
+        tag = "REUSED" if r.get("reused") else r["status"].upper()
+        log.info(f"  {r['sc_id']}: {tag} | tc_id: {r['testcase_id']}")
 
     return results
 
@@ -444,43 +492,63 @@ def phase2_fetch_test_cases(kane_results):
     print("PHASE 2 — Fetching TM test cases by session IDs (code generated)")
     print("="*60)
 
-    # Collect testcase_ids only from PASSED sessions — skip failed authoring runs
-    passed = [r for r in kane_results if r.get("status") == "passed" and r.get("testcase_id")]
+    passed       = [r for r in kane_results if r.get("status") == "passed" and r.get("testcase_id")]
     failed_count = sum(1 for r in kane_results if r.get("status") != "passed")
     if failed_count:
         print(f"  Skipping {failed_count} failed authoring run(s) — only passed test cases go to HyperExecute")
-    testcase_ids = [r["testcase_id"] for r in passed]
-    if not testcase_ids:
+    if not passed:
         print("  No passed testcase_ids — cannot proceed")
         return []
 
-    print(f"  Looking for {len(testcase_ids)} test case(s) in TM project...")
-    for tc_id in testcase_ids:
+    # Split: reused SCs already have full TM data in tm_test_cases.json — no API lookup needed.
+    # Only newly authored SCs need TM polling (give TM time to index).
+    tm_tcs       = json.loads(_TM_TC_FILE.read_text()) if _TM_TC_FILE.exists() else {}
+    reused_tcs   = []
+    new_tc_ids   = []
+
+    for r in passed:
+        if r.get("reused"):
+            tc_info = tm_tcs.get(r["sc_id"], {})
+            reused_tcs.append({
+                "test_case_id": r["testcase_id"],
+                "title":        tc_info.get("title", r["sc_id"]),
+                "internal_id":  tc_info.get("internal_id", ""),
+            })
+            print(f"  ⏭ {r['sc_id']}: reusing {tc_info.get('internal_id', r['testcase_id'])} — no TM lookup needed")
+        else:
+            new_tc_ids.append(r["testcase_id"])
+
+    if not new_tc_ids:
+        print(f"  All {len(reused_tcs)} test case(s) reused — skipping TM poll")
+        return reused_tcs
+
+    print(f"  Looking for {len(new_tc_ids)} newly authored test case(s) in TM project...")
+    for tc_id in new_tc_ids:
         print(f"    {tc_id}")
 
-    # Give TM a moment to index newly created test cases
+    # Give TM time to index newly created test cases
     print("  Waiting 15s for TM to index...")
     time.sleep(15)
 
     max_attempts = 6
     for attempt in range(1, max_attempts + 1):
         print(f"  Attempt {attempt}/{max_attempts}...")
-        test_cases = fetch_tm_test_cases_by_ids(testcase_ids)
-        if len(test_cases) == len(testcase_ids):
-            print(f"  Found all {len(test_cases)} test case(s) with code generated:")
-            for tc in test_cases:
+        new_tcs = fetch_tm_test_cases_by_ids(new_tc_ids)
+        if len(new_tcs) == len(new_tc_ids):
+            print(f"  Found all {len(new_tcs)} newly authored test case(s):")
+            for tc in new_tcs:
                 print(f"    {tc['internal_id']}: {tc['test_case_id']} | {tc['title'][:60]}")
-            return test_cases
-        elif test_cases:
-            print(f"  Found {len(test_cases)}/{len(testcase_ids)} so far — retrying in 15s...")
+            return reused_tcs + new_tcs
+        elif new_tcs:
+            print(f"  Found {len(new_tcs)}/{len(new_tc_ids)} so far — retrying in 15s...")
             if attempt == max_attempts:
                 print("  Using partial results.")
-                return test_cases
+                return reused_tcs + new_tcs
         else:
             print("  None found yet — retrying in 15s...")
         time.sleep(15)
 
-    return []
+    return reused_tcs
 
 
 # ── Phase 3: Create test run + trigger HyperExecute ──────────────────────────
