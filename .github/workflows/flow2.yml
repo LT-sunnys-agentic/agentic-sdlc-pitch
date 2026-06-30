@@ -17,9 +17,9 @@ on:
         required: false
         type: string
       from_step:
-        description: "Start from step (1=analyze reqs, 2=gen objectives, 3=flow2 pipeline)"
+        description: "Start from step (1=analyze reqs, 2=gen objectives, 3=flow2 pipeline). Defaults to 1 when requirements_url is set."
         required: false
-        default: "3"
+        default: "1"
         type: choice
         options: ["1", "2", "3"]
       tm_project_id:
@@ -205,7 +205,7 @@ jobs:
         run: python3 -u ci/analyze_requirements.py
 
       - name: "Step 2 — Generate kane-cli objectives (Claude)"
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.requirements_url != '' && (inputs.from_step == '' || inputs.from_step <= '2') }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.from_step == '' || inputs.from_step <= '2') }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python3 -u ci/generate_objectives.py

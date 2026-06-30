@@ -178,6 +178,7 @@ def run_kane(sc):
         "--code-export",
         "--code-language", "python",
         "--skip-code-validation",
+        "--timeout", str(KANE_TIMEOUT),
     ]
 
     # ── Streaming helpers ─────────────────────────────────────────────────────
