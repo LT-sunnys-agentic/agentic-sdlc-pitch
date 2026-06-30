@@ -3,15 +3,15 @@
     "id": "SC-001",
     "ac_id": "AC-001",
     "name": "SC-001: Add to cart changes button to Remove",
-    "objective": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add the Sauce Labs Backpack item to the cart using its 'Add to cart' button, and verify the shopping cart badge displays 1.",
-    "healed_from": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, and verify the cart badge shows 1."
+    "objective": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add the Sauce Labs Backpack to the cart, and verify the cart badge displays 1.",
+    "healed_from": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add the Sauce Labs Backpack item to the cart using its 'Add to cart' button, and verify the shopping cart badge displays 1."
   },
   {
     "id": "SC-002",
     "ac_id": "AC-002",
     "name": "SC-002: Cart page shows item name and price",
-    "objective": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, and verify the shopping cart badge displays 1.",
-    "healed_from": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, and verify the cart badge shows 1 item."
+    "objective": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, and verify the button label changes to 'Remove'.",
+    "healed_from": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, add Sauce Labs Backpack to the cart, and verify the shopping cart badge displays 1."
   },
   {
     "id": "SC-003",
@@ -24,8 +24,8 @@
     "id": "SC-004",
     "ac_id": "AC-004",
     "name": "SC-004: Sort by price shows cheapest product first",
-    "objective": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, sort the product list by Price (low to high), and verify that Sauce Labs Onesie appears as the first item in the list.",
-    "healed_from": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, sort the product list by Price (low to high), and verify that Sauce Labs Backpack is no longer the first item shown."
+    "objective": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, sort the product list by Price (low to high), and verify that Sauce Labs Onesie is displayed as the first product.",
+    "healed_from": "Login to https://www.saucedemo.com/ as standard_user with password secret_sauce, sort the product list by Price (low to high), and verify that Sauce Labs Onesie appears as the first item in the list."
   },
   {
     "id": "SC-005",
