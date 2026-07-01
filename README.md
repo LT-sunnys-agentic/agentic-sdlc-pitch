@@ -45,7 +45,7 @@ Push to main  ──────────────────────
          Test Run created in TM → instances linked with environment
                     ↓
          HyperExecute runs all tests in parallel (5 VMs, 1 retry per test)
-         └── pipeline polls until all sessions reach final state
+         └── pipeline polls HE job status API until job reaches final state
                     ↓
          Wait 120s for LT insights engine to index HE sessions
                     ↓
@@ -135,9 +135,11 @@ If an objective is unchanged from the last run and a valid TM test case already 
 
 The LT automation sessions API (used to fetch session results) indexes sessions almost immediately after they complete. The LT insights engine (used for AI RCA) is a separate system that ingests from the sessions API asynchronously — it typically lags by 2–3 minutes. Calling the RCA trigger too early returns `triggered=0` because the engine hasn't seen the sessions yet. The 120s wait is a safety buffer so the trigger finds the sessions on the first or second attempt.
 
-### Why filter sessions by HE trigger time?
+### Why use the HE sessions API instead of the automation sessions API?
 
-TM-triggered HE sessions are matched by TC internal ID (e.g. `TC-42299`) — not by build name, since each test case gets its own build UUID. When the same TCs are reused across runs (because the reuse check skipped kane-cli), the account's session history contains sessions for that TC from every previous run. Without a time filter, fetching the 100 most recent sessions returns 10-15 entries for 4 TCs — stale "passed" sessions from old runs can override a current "failed" result during deduplication. The pipeline records the exact UTC time HyperExecute is triggered and filters out any session created before that timestamp, so only sessions from the current run are considered.
+The automation sessions API (`/api/v1/sessions`) is account-wide — it returns the last 100 sessions across all runs. When the same TM test cases are reused across runs (because the reuse check skipped kane-cli), the same TC IDs (e.g. `TC-42299`) appear in every run's history. Fetching sessions by TC ID returns 10–15 entries for 4 TCs, with stale results from old runs overriding the current run's result during deduplication.
+
+The HE sessions API (`GET /v2.0/job/{jobID}/sessions`) is job-scoped — it returns exactly the sessions created by this HE job. No time filtering, no `exclude_ids` snapshot, no timezone mismatch. Each session entry includes `status: passed/failed`, the TC ID embedded in the `name` field (`"Web || gagandeepb || TC-42303"`), and a `sessionID` for building the automation dashboard link. The result is always exactly 1 session per SC, from the current run only.
 
 ---
 
@@ -219,7 +221,7 @@ Creates a Testmu AI Test Manager test run, links all authored test cases with a 
 | Retry on failure | 1 retry | Catches transient flakiness without masking real bugs |
 | Environment | Configurable via `TM_ENVIRONMENT_ID` | Decouple browser/OS config from pipeline code |
 
-The pipeline polls the automation sessions API until all sessions for this job reach a final state (`passed`, `failed`, `cancelled`) before proceeding to RCA.
+The pipeline polls `GET /v2.0/job/{jobID}` (HyperExecute job status API) every 30s until `status` reaches a terminal state (`completed`, `failed`, `cancelled`, `aborted`, `error`). Once the job is done, `GET /v2.0/job/{jobID}/sessions` fetches the per-TC session results (status + sessionID) scoped to exactly this job — no cross-run contamination.
 
 ---
 
@@ -389,5 +391,4 @@ python3 ci/flow2_pipeline.py --skip-phase1
 | Auto-improve commit | `paths-ignore` on `ci/objectives.json` + `requirements/analyzed_requirements.json` prevents re-triggering |
 | Custom URL run | Objectives generated for that URL; never overwrites default saucedemo objectives |
 | First run (no history) | Cross-run heal skips gracefully — nothing to heal |
-| Private Google Doc URL | Download fails — make the doc public ("Anyone with link can view") |
-U
+| Private Google Doc URL | Download fails — make the doc public ("Anyone with link can view") 
