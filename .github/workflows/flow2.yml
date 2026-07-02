@@ -7,15 +7,6 @@ name: "Agentic SDLC"
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  push:
-    branches: [main]
-    # Ignore auto-improve + state commits — they only touch these files.
-    # This replaces [skip ci] in commit messages as the loop-prevention mechanism.
-    paths-ignore:
-      - "ci/objectives.json"
-      - "ci/run_history.json"
-      - "ci/tm_test_cases.json"
-      - "requirements/analyzed_requirements.json"
   workflow_dispatch:
     inputs:
       requirements_url:
