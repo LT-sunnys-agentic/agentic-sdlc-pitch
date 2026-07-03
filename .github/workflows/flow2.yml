@@ -74,7 +74,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt --cache-dir ~/.cache/pip -q
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v24
         with:
           node-version: "24.16.0"
 
